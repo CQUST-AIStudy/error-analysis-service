@@ -1,7 +1,12 @@
-from typing import Any
+from __future__ import annotations
+
+from typing import Any, Generic, TypeVar
 
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
+
+T = TypeVar("T")
 
 
 class ApiError(HTTPException):
@@ -9,6 +14,14 @@ class ApiError(HTTPException):
         super().__init__(status_code=status_code, detail=message)
         self.code = code or status_code
         self.message = message
+
+
+class ApiResponse(BaseModel, Generic[T]):
+    """Unified response envelope matching the Java backend convention."""
+
+    code: int = Field(default=200, description="HTTP status code")
+    message: str = Field(default="success", description="Human-readable status message")
+    data: T | None = Field(default=None, description="Response payload; null on error")
 
 
 def api_success(data: Any = None, message: str = "success") -> dict[str, Any]:

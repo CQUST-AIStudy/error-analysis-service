@@ -1,6 +1,6 @@
 # Error Analysis Service
 
-AI 驱动的代码错误分析微服务，为智能实验辅助系统（PTA 教学辅助平台）提供错误诊断、学习预警和实验分析能力。
+AI 驱动的代码错误分析微服务，为 PTA 教学辅助系统提供错误诊断、主动干预和学习建议能力。
 
 ## 快速启动
 
@@ -36,11 +36,14 @@ uv run uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload
 
 所有接口返回统一格式：`{"code": 200, "message": "success", "data": {...}}`
 
-### 1. POST `/ai/error/analyze` — AI 错误分析
+---
+
+### 1. POST `/analyze/error` — AI 错误分析
 
 分析学生代码提交历史，诊断错误根因，生成学习建议。
 
-**请求示例：**
+**请求：**
+
 ```json
 {
   "studentId": "20220101001",
@@ -55,24 +58,38 @@ uv run uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload
       "judgeStatus": "COMPILE_ERROR",
       "compiler": "GCC",
       "errorMessage": "error: 'ListNode' was not declared in this scope",
-      "code": "#include <stdio.h>\nListNode* reverseList(ListNode* head) {...}",
-      "runtimeMs": null,
-      "memoryKb": null,
-      "submittedAt": "2026-06-03T10:30:00"
+      "code": "#include <stdio.h>\n...",
+      "submittedAt": "2026-06-05T10:30:00"
     }
   ]
 }
 ```
 
-**响应示例：**
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `studentId` | str | ✅ | 学号 |
+| `studentName` | str | ✅ | 姓名 |
+| `experimentId` | int | ✅ | 实验 ID |
+| `experimentName` | str | ✅ | 实验名称 |
+| `problemTitle` | str | ✅ | 题目标题 |
+| `problemDescription` | str | — | 题目描述（可选上下文） |
+| `submissions` | list | ✅ | 提交记录列表 |
+| `submissions[].attemptNo` | int | ✅ | 第几次提交（从1开始） |
+| `submissions[].judgeStatus` | str | ✅ | 判题状态：COMPILE_ERROR, RUNTIME_ERROR, WRONG_ANSWER, TIME_LIMIT_EXCEEDED, MEMORY_LIMIT_EXCEEDED, ACCEPTED |
+| `submissions[].compiler` | str | — | 编译器（GCC, G++） |
+| `submissions[].errorMessage` | str | — | 报错信息 |
+| `submissions[].code` | str | ✅ | 源代码 |
+| `submissions[].submittedAt` | str | — | 提交时间（ISO-8601） |
+
+**响应：**
+
 ```json
 {
   "code": 200,
   "message": "success",
   "data": {
-    "analysisId": "err_20260603_abc12345",
+    "analysisId": "err_20260605_abc12345",
     "overallAssessment": "该学生在链表操作上存在系统性问题...",
-    "errorPattern": "编译错误在首次提交后未得到解决，学生在第3次尝试后转为运行时错误...",
     "errorCategories": [
       {
         "type": "COMPILE_ERROR",
@@ -87,121 +104,203 @@ uv run uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload
       {
         "topic": "链表边界处理",
         "priority": "HIGH",
-        "reason": "连续5次提交中出现3次空指针/边界问题",
+        "reason": "连续5次提交中出现3次空指针问题",
         "suggestedResources": "复习教材第3章链表基本操作"
       }
     ],
     "interventionTriggered": true,
     "interventionMessage": "检测到你已连续提交5次，建议暂停提交，先查看错误分析报告再继续。加油！",
-    "severity": "HIGH"
+    "severity": "HIGH",
+    "aiGenerated": true
   }
 }
 ```
 
-### 2. POST `/ai/warning/analyze` — 学习预警分析
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `analysisId` | str | 分析唯一 ID |
+| `overallAssessment` | str | 综合诊断（中文） |
+| `errorCategories` | list | 错误分类 |
+| `errorCategories[].type` | str | 错误类型 |
+| `errorCategories[].count` | int | 出现次数 |
+| `errorCategories[].rootCause` | str | 根本原因 |
+| `errorCategories[].specificIssues` | list[str] | 具体问题 |
+| `errorCategories[].suggestions` | list[str] | 改进建议 |
+| `errorCategories[].isSystemic` | bool | 是否系统性薄弱点（≥3次） |
+| `learningSuggestions` | list | 学习建议 |
+| `learningSuggestions[].topic` | str | 知识点 |
+| `learningSuggestions[].priority` | str | 优先级：HIGH / MEDIUM / LOW |
+| `learningSuggestions[].reason` | str | 建议原因 |
+| `learningSuggestions[].suggestedResources` | str | 推荐资源 |
+| `interventionTriggered` | bool | 是否需要干预 |
+| `interventionMessage` | str | 给学生看的提示语 |
+| `severity` | str | HIGH / MEDIUM / LOW |
+| `aiGenerated` | bool | true=AI生成，false=规则引擎降级 |
 
-对班级学生的提交统计进行预警分析，识别需要教学干预的学生。
+---
 
-**请求示例：**
+### 2. POST `/analyze/warning` — AI 主动干预
+
+检测单个学生是否需要教学干预（触发条件：错误次数 > 5）。
+
+**请求：**
+
 ```json
 {
-  "classId": 10,
+  "studentId": "20220101001",
+  "studentName": "张三",
   "experimentId": 42,
   "experimentName": "实验三-链表",
   "deadline": "2026-06-10T23:59:00",
-  "students": [
-    {
-      "studentId": "20220101001",
-      "studentName": "张三",
-      "totalSubmissions": 10,
-      "acceptedCount": 1,
-      "compileErrors": 3,
-      "runtimeErrors": 2,
-      "wrongAnswers": 4,
-      "timeLimitExceeded": 0,
-      "lastSubmissionAt": "2026-06-03T11:00:00"
-    }
-  ]
+  "totalSubmissions": 10,
+  "acceptedCount": 1,
+  "totalProblems": 5,
+  "compileErrors": 3,
+  "runtimeErrors": 2,
+  "wrongAnswers": 4,
+  "timeLimitExceeded": 0,
+  "lastSubmissionAt": "2026-06-05T11:00:00"
 }
 ```
 
-**响应示例：**
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `studentId` | str | ✅ | 学号 |
+| `studentName` | str | ✅ | 姓名 |
+| `experimentId` | int | ✅ | 实验 ID |
+| `experimentName` | str | ✅ | 实验名称 |
+| `deadline` | str | — | 截止时间（ISO-8601） |
+| `totalSubmissions` | int | ✅ | 总提交次数 |
+| `acceptedCount` | int | ✅ | 已通过题数 |
+| `totalProblems` | int | ✅ | 总题数 |
+| `compileErrors` | int | ✅ | 编译错误次数 |
+| `runtimeErrors` | int | ✅ | 运行时错误次数 |
+| `wrongAnswers` | int | ✅ | 答案错误次数 |
+| `timeLimitExceeded` | int | ✅ | 超时次数 |
+| `lastSubmissionAt` | str | ✅ | 最近提交时间 |
+
+**响应：**
+
 ```json
 {
   "code": 200,
   "message": "success",
   "data": {
-    "warnings": [
+    "studentId": "20220101001",
+    "level": "HIGH",
+    "triggered": true,
+    "warningType": "FREQUENT_FAILURE",
+    "warningMessage": "你已提交10次但通过率较低，建议暂停提交，先查看AI错误分析报告再继续。",
+    "teacherNote": "提交10次，通过率仅10%，需要重点关注。",
+    "suggestedActions": ["查看AI错误分析报告", "复习相关知识点", "向教师请教"],
+    "autoNotify": true,
+    "aiGenerated": true
+  }
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `studentId` | str | 学号 |
+| `level` | str | HIGH / MEDIUM / LOW / OK |
+| `triggered` | bool | 是否触发告警 |
+| `warningType` | str | FREQUENT_FAILURE / BASIC_SYNTAX / STUCK / DEADLINE_RISK / OK |
+| `warningMessage` | str | 给学生看的提示 |
+| `teacherNote` | str | 给老师看的备注 |
+| `suggestedActions` | list[str] | 建议措施 |
+| `autoNotify` | bool | 是否自动通知 |
+| `aiGenerated` | bool | AI or 规则引擎 |
+
+---
+
+### 3. POST `/analyze/learning` — AI 学习建议生成
+
+基于学生错误历史和技能状态，生成个性化学习建议。
+
+**请求：**
+
+```json
+{
+  "studentId": "20220101001",
+  "studentName": "张三",
+  "errorHistory": [
+    {"errorType": "COMPILE_ERROR", "count": 5},
+    {"errorType": "RUNTIME_ERROR", "count": 3}
+  ],
+  "skillStates": [
+    {"tagName": "指针", "masteryScore": 35.0, "attemptCount": 8},
+    {"tagName": "链表", "masteryScore": 60.0, "attemptCount": 5}
+  ],
+  "previousRemark": "上次分析指出该生在指针使用方面存在困难..."
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `studentId` | str | ✅ | 学号 |
+| `studentName` | str | ✅ | 姓名 |
+| `errorHistory` | list | ✅ | 错误类型分布 |
+| `errorHistory[].errorType` | str | ✅ | 错误类型 |
+| `errorHistory[].count` | int | ✅ | 出现次数 |
+| `skillStates` | list | — | 技能掌握状态 |
+| `skillStates[].tagName` | str | ✅ | 技能标签（如"指针"、"链表"） |
+| `skillStates[].masteryScore` | float | ✅ | 掌握度 0-100 |
+| `skillStates[].attemptCount` | int | — | 练习次数 |
+| `previousRemark` | str | — | 上次AI评语 |
+
+**响应：**
+
+```json
+{
+  "code": 200,
+  "message": "success",
+  "data": {
+    "suggestionId": "lrn_20260605_abc12345",
+    "weakPoints": [
       {
-        "studentId": "20220101001",
-        "level": "HIGH",
-        "triggered": true,
-        "warningType": "FREQUENT_FAILURE",
-        "warningMessage": "你已提交10次但通过率较低，建议暂停提交，先查看AI错误分析报告再继续。",
-        "teacherNote": "提交10次，AC率仅10%，需要重点关注。",
-        "suggestedActions": ["查看AI错误分析报告", "复习相关知识点", "向教师请教"],
-        "autoNotify": true
+        "tagName": "指针",
+        "severity": "HIGH",
+        "reason": "编译错误中5次涉及指针类型不匹配"
       }
     ],
-    "classSummary": "班级共60人，21人触发预警（35%）。建议教师在课堂上针对高频错误进行集中讲解。"
-  }
-}
-```
-
-### 3. POST `/ai/experiment/analyze` — 实验完成情况分析
-
-从教学视角分析全班实验数据，给出教学改进建议。
-
-**请求示例：**
-```json
-{
-  "experimentId": 42,
-  "experimentName": "实验三-链表",
-  "classId": 10,
-  "totalStudents": 60,
-  "completed": 45,
-  "inProgress": 10,
-  "notStarted": 5,
-  "avgSubmissions": 6.3,
-  "avgPassRate": 0.72,
-  "commonErrors": [
-    {"type": "COMPILE_ERROR", "count": 45, "percentage": 35.0},
-    {"type": "RUNTIME_ERROR", "count": 32, "percentage": 25.0}
-  ],
-  "problemStats": [
-    {"label": "1-1 链表反转", "avgSubmissions": 8.2, "passRate": 0.34},
-    {"label": "1-2 栈实现", "avgSubmissions": 3.1, "passRate": 0.85}
-  ]
-}
-```
-
-**响应示例：**
-```json
-{
-  "code": 200,
-  "message": "success",
-  "data": {
-    "completionAssessment": "实验整体完成情况良好，45/60人已完成（75%）。...",
-    "difficultyAnalysis": {
-      "hardestProblem": "1-1 链表反转",
-      "reason": "该题平均提交8.2次，AC率仅34%，是全班最大的拦路虎",
-      "avgSubmissions": 8.2,
-      "passRate": 0.34
-    },
-    "commonErrorAnalysis": "编译错误（35%）和运行时错误（25%）是最常见的问题类型...",
-    "teachingSuggestions": [
-      "建议在课堂上重点讲解链表反转的两种实现（迭代/递归）",
-      "对于尚未开始的5名学生，建议逐个了解原因"
+    "studyPlan": [
+      {
+        "topic": "指针基础",
+        "priority": "HIGH",
+        "suggestedResources": "教材第3章 指针与内存管理",
+        "estimatedTime": "1小时"
+      }
     ],
-    "riskStudents": ["20220101001", "20220101015"]
+    "recommendedProblems": ["PTA同类题目练习", "教材课后习题"],
+    "summaryMessage": "根据你的提交记录分析...建议优先巩固指针基础，加油！",
+    "aiGenerated": true
   }
 }
 ```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `suggestionId` | str | 建议唯一 ID |
+| `weakPoints` | list | 薄弱知识点 |
+| `weakPoints[].tagName` | str | 知识点名称 |
+| `weakPoints[].severity` | str | HIGH / MEDIUM / LOW |
+| `weakPoints[].reason` | str | 识别原因 |
+| `studyPlan` | list | 学习计划 |
+| `studyPlan[].topic` | str | 学习主题 |
+| `studyPlan[].priority` | str | HIGH / MEDIUM / LOW |
+| `studyPlan[].suggestedResources` | str | 推荐资源 |
+| `studyPlan[].estimatedTime` | str | 预估时间 |
+| `recommendedProblems` | list[str] | 推荐练习方向 |
+| `summaryMessage` | str | 总结鼓励语 |
+| `aiGenerated` | bool | AI or 规则引擎 |
+
+---
 
 ## 容错机制
 
 当 DeepSeek API 不可用时（网络错误、API Key 无效等），服务会自动降级到**规则引擎**：
 - 返回 200 状态码 + 完整的响应结构
+- `aiGenerated` 字段为 `false`
 - `overallAssessment` 中会标注「AI分析暂时不可用」
 - 错误分类和学习建议基于预定义的规则模板生成
 - 预警分析基于统计阈值判断，不依赖 AI
@@ -221,37 +320,31 @@ uv run ruff check .
 uv run ruff check --fix .
 ```
 
-## 给队友的集成指南
+## 集成指南
 
-### 1号成员（后端核心）- Java 集成
+本服务为内部微服务，由 Java 后端调用，不直接暴露给前端。
 
-1. 在 `application.properties` 添加：
-```properties
-error.analysis.service.url=http://127.0.0.1:8002
-```
-
-2. 创建 `ErrorAnalysisController`，调用本服务的三个接口
-3. 创建数据库表存储分析结果（`ai_error_analysis`、`ai_warning`）
-4. PTA 同步完成后自动触发分析（error count > 5 → 自动调用）
-
-### 6号成员（前端）
-
-1. 新增 `AIErrorAnalysis.vue` 页面展示错误分析报告
-2. 在导航栏添加预警红点（调用 Java 后端的预警查询接口）
-3. 教师端增加「实验分析」Tab，展示全班分析结果
-
-### 调用流程建议
+### 调用流程
 
 ```
-学生查看分析报告：
-  frontend → Java: GET /api/ai/error/analysis/{studentId}
-  Java: 从数据库读取缓存结果，或调用 error-analysis-service
-  error-analysis-service → DeepSeek → 返回分析结果
-
-PTA同步后自动分析：
-  spider-repo 同步完成 → Java 检测 → 遍历学生
-    → 若 errorCount > 5: 调用 POST /ai/error/analyze
-    → 存储结果到 ai_error_analysis 表
-  Java → 调用 POST /ai/warning/analyze（班级维度）
-    → 存储预警到 ai_warning 表
+学生提交错误 → Java 后端检测
+  ├─ 调用 POST /analyze/error（错误分析）
+  ├─ 如果 error count > 5 → 调用 POST /analyze/warning（干预检测）
+  └─ 错误分析完成后 → 调用 POST /analyze/learning（学习建议）
 ```
+
+### Java 后端需准备的数据
+
+三个接口的 request 数据均可从以下表获取：
+
+| 数据 | 来源表 |
+|------|--------|
+| 提交记录（状态、编译器等） | `student_problem_attempt` |
+| 报错信息 | `pta_raw_submission_row` |
+| 源代码 | `artifact.text_content`（通过 `student_problem_state.latest_code_artifact_id`） |
+| 学生技能状态 | `student_skill_state` |
+| 历史评语 | `ai_remarks` |
+
+### 存储方案
+
+Java 后端可根据返回的 JSON 自行建表存储分析结果，本服务不持久化任何数据。

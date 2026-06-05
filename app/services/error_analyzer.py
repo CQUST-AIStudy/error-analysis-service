@@ -145,7 +145,6 @@ def _rule_based_fallback(request: ErrorAnalysisRequest) -> ErrorAnalysisData:
         analysisId=f"err_{datetime.now().strftime('%Y%m%d')}_{uuid.uuid4().hex[:8]}",
         overallAssessment=f"该学生在{request.experiment_name or '本次实验'}中共提交{total}次，"
         f"通过{ac_count}次。AI分析暂时不可用，以下为基于规则的分析。",
-        errorPattern="（AI分析不可用，无法判断错误演变模式）",
         errorCategories=error_categories,
         learningSuggestions=[],
         interventionTriggered=triggered,
@@ -155,6 +154,7 @@ def _rule_based_fallback(request: ErrorAnalysisRequest) -> ErrorAnalysisData:
             else None
         ),
         severity="HIGH" if triggered else ("MEDIUM" if error_categories else "LOW"),
+        aiGenerated=False,
     )
 
 
@@ -241,7 +241,6 @@ def analyze_errors(request: ErrorAnalysisRequest, deepseek: DeepSeekClient) -> E
         return ErrorAnalysisData(
             analysisId=analysis_id,
             overallAssessment=result.get("overallAssessment", ""),
-            errorPattern=result.get("errorPattern"),
             errorCategories=[
                 ErrorCategory(
                     type=c.get("type", "UNKNOWN"),
@@ -265,6 +264,7 @@ def analyze_errors(request: ErrorAnalysisRequest, deepseek: DeepSeekClient) -> E
             interventionTriggered=result.get("interventionTriggered", False),
             interventionMessage=result.get("interventionMessage"),
             severity=result.get("severity", "LOW"),
+            aiGenerated=True,
         )
     except Exception as e:
         logger.error("Failed to parse AI response: %s", e, exc_info=True)

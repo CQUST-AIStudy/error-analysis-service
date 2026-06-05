@@ -1,33 +1,34 @@
-"""POST /ai/warning/analyze — Learning warning analysis endpoint."""
+"""POST /analyze/warning — AI proactive intervention endpoint."""
 
 import logging
 
 from fastapi import APIRouter, Depends
 
-from app.core.responses import ApiError, api_success
-from app.schemas.requests import WarningAnalysisResponse, WarningAnalyzeRequest
+from app.core.responses import ApiError, ApiResponse
+from app.schemas.requests import WarningAnalyzeRequest, WarningResult
 from app.services.deepseek_client import DeepSeekClient, get_deepseek_client
-from app.services.warning_detector import analyze_warnings
+from app.services.warning_detector import analyze_warning
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/ai", tags=["warning-analysis"])
+router = APIRouter(prefix="/analyze", tags=["warning-analysis"])
 
 
-@router.post("/warning/analyze", response_model=WarningAnalysisResponse)
+@router.post("/warning", response_model=ApiResponse[WarningResult])
 def warning_analyze(
     request: WarningAnalyzeRequest,
     deepseek: DeepSeekClient = Depends(get_deepseek_client),
 ):
-    """Analyze student learning warnings using AI.
+    """Detect whether a student needs teaching intervention.
 
-    Receives class-level submission statistics, pre-filters students
-    needing attention, and calls AI for in-depth warning analysis.
-    Returns per-student warning levels, messages, and suggested actions.
+    Receives per-student submission statistics, checks for warning
+    conditions (triggered when error count > 5), and returns
+    warning level, type, messages, and suggested actions.
+    Called by Java backend when a student's error count exceeds threshold.
     """
     try:
-        result = analyze_warnings(request, deepseek)
-        return api_success(result.model_dump(by_alias=True))
+        result = analyze_warning(request, deepseek)
+        return ApiResponse(data=result)
     except ApiError:
         raise
     except Exception as e:

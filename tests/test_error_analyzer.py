@@ -134,7 +134,10 @@ class TestRuleBasedFallback:
     def test_ignores_accepted(self):
         request = ErrorAnalysisRequest(
             studentId="s1",
+            studentName="测试",
             experimentId=1,
+            experimentName="测试实验",
+            problemTitle="测试题",
             submissions=[
                 SubmissionRecord(
                     attemptNo=1,
@@ -146,7 +149,12 @@ class TestRuleBasedFallback:
         result = _rule_based_fallback(request)
         assert len(result.error_categories) == 0
 
+    def test_fallback_sets_ai_generated_false(self, single_submission_request):
+        result = _rule_based_fallback(single_submission_request)
+        assert result.ai_generated is False
+
     def test_degraded_analysis_via_main_function(self, single_submission_request, empty_key_client):
         result = analyze_errors(single_submission_request, empty_key_client)
         assert result.analysis_id.startswith("err_")
         assert "AI分析暂时不可用" in result.overall_assessment
+        assert result.ai_generated is False
