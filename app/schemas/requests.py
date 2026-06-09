@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class BaseSchema(BaseModel):
-    model_config = ConfigDict(populate_by_name=True, extra="forbid", str_strip_whitespace=True)
+    model_config = ConfigDict(populate_by_name=True, extra="ignore", str_strip_whitespace=True)
 
 
 # ── Shared types ─────────────────────────────────────────
@@ -53,6 +53,16 @@ class SubmissionRecord(BaseSchema):
         None,
         alias="submittedAt",
         description="ISO-8601 submission timestamp",
+    )
+    runtime_ms: int | None = Field(
+        None,
+        alias="runtimeMs",
+        description="Execution time in milliseconds (for TIME_LIMIT_EXCEEDED analysis)",
+    )
+    memory_kb: int | None = Field(
+        None,
+        alias="memoryKb",
+        description="Memory usage in KB (for MEMORY_LIMIT_EXCEEDED analysis)",
     )
 
 
@@ -277,6 +287,21 @@ class WarningAnalyzeRequest(BaseSchema):
         alias="lastSubmissionAt",
         description="ISO-8601 timestamp of most recent submission",
     )
+    # ── 可选：当后端传入完整提交数据时，warning 内部串联 error+learning 分析 ──
+    submissions: list[SubmissionRecord] | None = Field(
+        None,
+        description="Optional: full submission records with code for internal chaining to /analyze/error",
+    )
+    error_history: list["ErrorTypeCount"] | None = Field(
+        None,
+        alias="errorHistory",
+        description="Optional: error type distribution for internal chaining to /analyze/learning",
+    )
+    skill_states: list["SkillState"] | None = Field(
+        None,
+        alias="skillStates",
+        description="Optional: skill mastery states for internal chaining to /analyze/learning",
+    )
 
 
 class WarningResult(BaseSchema):
@@ -323,6 +348,26 @@ class WarningResult(BaseSchema):
         default=True,
         alias="aiGenerated",
         description="True if AI produced this result; false = rule-engine fallback",
+    )
+
+
+class WarningCombinedData(BaseSchema):
+    """Combined response for /analyze/warning when triggered=true and submissions provided.
+
+    PDF要求：错误>5时自动串联 错误分析 + 学习建议 + 预警提示。
+    """
+
+    triggered: bool = Field(True, description="Always true in combined response")
+    warning: WarningResult = Field(..., description="Warning detection result")
+    error_analysis: ErrorAnalysisData | None = Field(
+        None,
+        alias="errorAnalysis",
+        description="Auto-chained error analysis result",
+    )
+    learning_suggestions: LearningSuggestData | None = Field(
+        None,
+        alias="learningSuggestions",
+        description="Auto-chained learning suggestion result",
     )
 
 

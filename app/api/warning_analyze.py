@@ -1,11 +1,24 @@
-"""POST /analyze/warning — AI proactive intervention endpoint."""
+"""POST /analyze/warning — AI proactive intervention endpoint.
+
+PDF 3号成员要求：错误次数 > 5 时自动串联三个功能：
+  1. 预警检测
+  2. 错误代码分析 (/analyze/error)
+  3. 学习建议生成 (/analyze/learning)
+
+当后端传入 submissions 数据时，返回 WarningCombinedData；
+否则只返回 WarningResult。
+"""
 
 import logging
 
 from fastapi import APIRouter, Depends
 
 from app.core.responses import ApiError, ApiResponse
-from app.schemas.requests import WarningAnalyzeRequest, WarningResult
+from app.schemas.requests import (
+    WarningAnalyzeRequest,
+    WarningCombinedData,
+    WarningResult,
+)
 from app.services.deepseek_client import DeepSeekClient, get_deepseek_client
 from app.services.warning_detector import analyze_warning
 
@@ -14,16 +27,17 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/analyze", tags=["warning-analysis"])
 
 
-@router.post("/warning", response_model=ApiResponse[WarningResult])
+@router.post("/warning")
 def warning_analyze(
     request: WarningAnalyzeRequest,
     deepseek: DeepSeekClient = Depends(get_deepseek_client),
 ):
     """Detect whether a student needs teaching intervention.
 
-    Receives per-student submission statistics, checks for warning
-    conditions (triggered when error count > 5), and returns
-    warning level, type, messages, and suggested actions.
+    Receives per-student submission statistics. When error count > 5
+    AND submissions data is provided, internally chains to /analyze/error
+    and /analyze/learning, returning a combined result.
+
     Called by Java backend when a student's error count exceeds threshold.
     """
     try:

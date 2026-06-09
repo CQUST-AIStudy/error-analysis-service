@@ -1,11 +1,33 @@
-"""Learning warning detection with AI-driven analysis (single student)."""
+"""Learning warning detection with AI-driven analysis (single student).
+
+PDF 3号成员要求：当错误次数 > 5，自动串联三个功能：
+  1. 预警检测 (/analyze/warning)
+  2. 错误代码分析 (/analyze/error)
+  3. 学习建议生成 (/analyze/learning)
+
+当后端传入 submission 数据时，/analyze/warning 内部自动调用另外两个接口，
+一次性返回完整结果。
+"""
 
 import logging
 
-from app.schemas.requests import WarningAnalyzeRequest, WarningResult
+from app.schemas.requests import (
+    ErrorAnalysisData,
+    ErrorAnalysisRequest,
+    ErrorTypeCount,
+    LearningSuggestData,
+    LearningSuggestRequest,
+    SkillState,
+    SubmissionRecord,
+    WarningAnalyzeRequest,
+    WarningCombinedData,
+    WarningResult,
+)
 from app.services.deepseek_client import DeepSeekClient
 
 logger = logging.getLogger(__name__)
+
+# ── Warning detection prompt ─────────────────────────────
 
 WARNING_SYSTEM_PROMPT = """你是重庆科技大学的学习预警分析师。基于单个学生的提交统计数据，判断该学生是否需要教学干预。
 
@@ -129,11 +151,42 @@ def _rule_based_warning(request: WarningAnalyzeRequest) -> WarningResult:
     )
 
 
-def analyze_warning(request: WarningAnalyzeRequest, deepseek: DeepSeekClient) -> WarningResult:
-    """Run warning analysis for a single student: AI-driven with rule-based fallback."""
+def _count_errors(request: WarningAnalyzeRequest) -> int:
+    """Count total non-ACCEPTED submissions from the stats."""
+    return (
+        request.compile_errors
+        + request.runtime_errors
+        + request.wrong_answers
+        + request.time_limit_exceeded
+    )
 
+
+# ── Main analysis function ──────────────────────────────
+
+
+def analyze_warning(request: WarningAnalyzeRequest, deepseek: DeepSeekClient):
+    """Run warning analysis for a single student.
+
+    PDF要求：当错误次数 > 5 且后端传入了 submissions 数据，
+    内部自动串联调用 /analyze/error 和 /analyze/learning，
+    一次性返回完整结果 (WarningCombinedData)。
+    """
+
+    error_count = _count_errors(request)
+    logger.info(
+        "Warning analysis: student=%s exp=%d errors=%d hasSubmissions=%s",
+        request.student_id,
+        request.experiment_id,
+        error_count,
+        request.submissions is not None and len(request.submissions) > 0,
+    )
+
+    # ── 1. 判断是否触发 ───────────────────────────────
     if not _needs_ai_analysis(request):
-        logger.info("Student %s has no submission data or all accepted, returning OK", request.student_id)
+        logger.info(
+            "Student %s has no submission data or all accepted, returning OK",
+            request.student_id,
+        )
         return WarningResult(
             studentId=request.student_id,
             level="OK",
@@ -146,34 +199,135 @@ def analyze_warning(request: WarningAnalyzeRequest, deepseek: DeepSeekClient) ->
             aiGenerated=False,
         )
 
-    if not deepseek.settings.deepseek_api_key:
-        logger.warning("DEEPSEEK_API_KEY not configured, using rule engine")
-        return _rule_based_warning(request)
-
-    prompt = _build_warning_prompt(request)
-    result = deepseek.chat_json(
-        system_prompt=WARNING_SYSTEM_PROMPT,
-        user_message=prompt,
-        temperature=0.5,
-        max_tokens=2048,
-    )
-
-    if result is None:
-        logger.warning("DeepSeek call failed, using rule engine")
-        return _rule_based_warning(request)
-
-    try:
+    if error_count <= 5:
+        logger.info(
+            "Student %s error count %d <= 5, no intervention needed",
+            request.student_id,
+            error_count,
+        )
         return WarningResult(
             studentId=request.student_id,
-            level=result.get("level", "MEDIUM"),
-            triggered=result.get("triggered", False),
-            warningType=result.get("warningType", "OK"),
-            warningMessage=result.get("warningMessage", ""),
-            teacherNote=result.get("teacherNote"),
-            suggestedActions=result.get("suggestedActions", []),
-            autoNotify=result.get("autoNotify", False),
-            aiGenerated=True,
+            level="LOW",
+            triggered=False,
+            warningType="OK",
+            warningMessage=f"当前错误{error_count}次，暂未达到干预阈值，请继续保持。",
+            teacherNote=None,
+            suggestedActions=[],
+            autoNotify=False,
+            aiGenerated=False,
+        )
+
+    # ── 2. 生成预警结果 ────────────────────────────────
+    if not deepseek.settings.deepseek_api_key:
+        logger.warning("DEEPSEEK_API_KEY not configured, using rule engine")
+        warning = _rule_based_warning(request)
+    else:
+        prompt = _build_warning_prompt(request)
+        result = deepseek.chat_json(
+            system_prompt=WARNING_SYSTEM_PROMPT,
+            user_message=prompt,
+            temperature=0.5,
+            max_tokens=2048,
+        )
+
+        if result is None:
+            logger.warning("DeepSeek call failed, using rule engine")
+            warning = _rule_based_warning(request)
+        else:
+            try:
+                warning = WarningResult(
+                    studentId=request.student_id,
+                    level=result.get("level", "MEDIUM"),
+                    triggered=result.get("triggered", True),
+                    warningType=result.get("warningType", "FREQUENT_FAILURE"),
+                    warningMessage=result.get("warningMessage", ""),
+                    teacherNote=result.get("teacherNote"),
+                    suggestedActions=result.get("suggestedActions", []),
+                    autoNotify=result.get("autoNotify", True),
+                    aiGenerated=True,
+                )
+            except Exception as e:
+                logger.error("Failed to parse AI warning response: %s", e, exc_info=True)
+                warning = _rule_based_warning(request)
+
+    # ── 3. 串联：如果触发且后端传了 submissions，自动调 error+learning ──
+    if not warning.triggered:
+        return warning
+
+    has_submissions = request.submissions is not None and len(request.submissions) > 0
+    if not has_submissions:
+        logger.info(
+            "Warning triggered but no submission data provided, returning warning only"
+        )
+        return warning
+
+    # ── 3a. 内部调用错误分析 (/analyze/error) ───────────
+    error_analysis = None
+    try:
+        # 动态导入避免循环依赖
+        from app.services.error_analyzer import analyze_errors as _analyze_errors
+
+        error_request = ErrorAnalysisRequest(
+            studentId=request.student_id,
+            studentName=request.student_name,
+            experimentId=request.experiment_id,
+            experimentName=request.experiment_name,
+            problemTitle=f"实验{request.experiment_id} - 全部题目",
+            problemDescription=None,
+            submissions=request.submissions,
+        )
+        error_analysis = _analyze_errors(error_request, deepseek)
+        logger.info(
+            "Chained error analysis completed: analysisId=%s",
+            error_analysis.analysis_id if error_analysis else "null",
         )
     except Exception as e:
-        logger.error("Failed to parse AI warning response: %s", e, exc_info=True)
-        return _rule_based_warning(request)
+        logger.error("Chained error analysis failed: %s", e, exc_info=True)
+
+    # ── 3b. 内部调用学习建议 (/analyze/learning) ────────
+    learning_suggestions = None
+    try:
+        from app.services.learning_advisor import generate_suggestions as _generate_suggestions
+
+        # 用请求中的 error_history，如果没有则从 submissions 构造
+        eh = request.error_history
+        if eh is None or len(eh) == 0:
+            eh = _build_error_history_from_submissions(request.submissions)
+
+        ss = request.skill_states or []
+
+        learning_request = LearningSuggestRequest(
+            studentId=request.student_id,
+            studentName=request.student_name,
+            errorHistory=eh,
+            skillStates=ss,
+            previousRemark=None,
+        )
+        learning_suggestions = _generate_suggestions(learning_request, deepseek)
+        logger.info("Chained learning suggestions completed")
+    except Exception as e:
+        logger.error("Chained learning suggestions failed: %s", e, exc_info=True)
+
+    # ── 3c. 返回合并结果 ─────────────────────────────
+    return WarningCombinedData(
+        triggered=True,
+        warning=warning,
+        errorAnalysis=error_analysis,
+        learningSuggestions=learning_suggestions,
+    )
+
+
+def _build_error_history_from_submissions(
+    submissions: list[SubmissionRecord],
+) -> list[ErrorTypeCount]:
+    """Build error type distribution from submission records."""
+    counts: dict[str, int] = {}
+    for sub in submissions:
+        status = sub.judge_status.upper() if sub.judge_status else "UNKNOWN"
+        if status in ("ACCEPTED", "AC"):
+            continue
+        counts[status] = counts.get(status, 0) + 1
+    return [
+        ErrorTypeCount(errorType=k, count=v)
+        for k, v in sorted(counts.items(), key=lambda x: -x[1])
+    ]
