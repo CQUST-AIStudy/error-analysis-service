@@ -2,49 +2,111 @@
 
 AI 驱动的代码错误分析微服务，为 PTA 教学辅助系统提供错误诊断、主动干预和学习建议能力。
 
+**端口**: `8002` | **技术栈**: FastAPI + DeepSeek + OpenAI SDK | **负责人**: 3号成员 r2220
+
+---
+
+## 目录
+
+1. [快速启动](#快速启动)
+2. [架构总览](#架构总览)
+3. [API 接口文档](#api-接口文档)
+4. [后端集成详解](#后端集成详解)
+5. [前端集成详解](#前端集成详解)
+6. [Postman 测试指南](#postman-测试指南)
+
+---
+
 ## 快速启动
 
 ```bash
-# 1. 安装依赖
-uv sync
+cd D:/IDEA/Ptaapps/error-analysis-service
+
+# 1. 创建虚拟环境 & 安装依赖
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
 
 # 2. 配置环境变量
 cp .env.example .env
-# 编辑 .env 填入 DEEPSEEK_API_KEY
+# 编辑 .env 填入 DEEPSEEK_API_KEY（没有 key 也能启动，走规则引擎降级）
 
-# 3. 启动服务
-uv run uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload
+# 3. 启动
+uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload
 ```
 
-启动后可访问：
 - 健康检查：`GET http://127.0.0.1:8002/health`
 - Swagger 文档：`http://127.0.0.1:8002/docs`
 
-## 环境变量
+---
+
+## 架构总览
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  前端 Vue :8080                                                       │
+│  ┌──────────────────────────────────────────────────────────────┐    │
+│  │ api/index.js                                                 │    │
+│  │   analyzeError()          → POST /api/analysis/error         │    │
+│  │   getWarningAnalysis()    → POST /api/analysis/warning       │    │
+│  │   getLearningSuggestions()→ POST /api/analysis/learning      │    │
+│  └───────────────────────────┬──────────────────────────────────┘    │
+│                               │                                       │
+│  ┌───────────────────────────┼──────────────────────────────────┐    │
+│  │ 页面                     │                                    │    │
+│  │  Dashboard.vue           ← getWarningAnalysis() → WarningBanner  │
+│  │  LearningAnalysis.vue    ← analyzeError()       → ErrorAnalysisCard
+│  │  Practice.vue            ← getLearningSuggestions() → weakPoints │
+│  └───────────────────────────┼──────────────────────────────────┘    │
+└──────────────────────────────┼───────────────────────────────────────┘
+                               │  POST /api/analysis/*
+┌──────────────────────────────┼───────────────────────────────────────┐
+│  后端 Spring Boot :8081      │                                       │
+│                              ▼                                       │
+│  ErrorAnalysisController    (/api/analysis/*)                       │
+│        │                                                             │
+│  ErrorAnalysisServiceImpl                                           │
+│        │  ├─ TeacherExperimentQueryDao.findSubmissionProblemRows()   │
+│        │  ├─ Native SQL: student_profile, student_problem_attempt   │
+│        │  ├─ Native SQL: student_skill_state, ai_remarks            │
+│        │  └─ Native SQL: assignment_offering, assignment_template   │
+│        │                                                             │
+│  RestTemplate → POST http://127.0.0.1:8002/analyze/*                │
+└──────────────────────────────┼───────────────────────────────────────┘
+                               │
+┌──────────────────────────────┼───────────────────────────────────────┐
+│  error-analysis-service :8002│                                       │
+│                              ▼                                       │
+│  POST /analyze/error      → error_analyzer.py   → DeepSeek API      │
+│  POST /analyze/warning    → warning_detector.py → DeepSeek API      │
+│  POST /analyze/learning   → learning_advisor.py → DeepSeek API      │
+│                                                                      │
+│  降级: DeepSeek 不可用时自动走规则引擎，始终返回 200                   │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## API 接口文档
+
+所有接口返回统一格式：`{"code": 200, "message": "success", "data": {...}}`
+
+### 环境变量
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `DEEPSEEK_API_KEY` | - | DeepSeek API Key（**必填**） |
+| `DEEPSEEK_API_KEY` | — | DeepSeek API Key（为空时走规则引擎降级） |
 | `DEEPSEEK_BASE_URL` | `https://api.deepseek.com/v1` | API 地址 |
 | `DEEPSEEK_MODEL` | `deepseek-chat` | 模型名称 |
 | `SERVICE_HOST` | `0.0.0.0` | 监听地址 |
 | `SERVICE_PORT` | `8002` | 服务端口 |
-| `REQUEST_TIMEOUT` | `30` | DeepSeek 请求超时(秒) |
-| `MAX_CODE_LINES` | `3000` | 单次分析最大代码行数 |
-
-## API 接口
-
-所有接口返回统一格式：`{"code": 200, "message": "success", "data": {...}}`
 
 ---
 
 ### 1. POST `/analyze/error` — AI 错误分析
 
-分析学生代码提交历史，诊断错误根因，生成学习建议。
-
-**请求：**
-
 ```json
+// Request
 {
   "studentId": "20220101001",
   "studentName": "张三",
@@ -52,99 +114,38 @@ uv run uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload
   "experimentName": "实验三-链表",
   "problemTitle": "链表反转",
   "problemDescription": "给定一个单链表的头节点 head，请反转链表...",
-  "submissions": [
-    {
-      "attemptNo": 1,
-      "judgeStatus": "COMPILE_ERROR",
-      "compiler": "GCC",
-      "errorMessage": "error: 'ListNode' was not declared in this scope",
-      "code": "#include <stdio.h>\n...",
-      "submittedAt": "2026-06-05T10:30:00"
-    }
-  ]
+  "submissions": [{
+    "attemptNo": 1,
+    "judgeStatus": "COMPILE_ERROR",
+    "compiler": "GCC",
+    "errorMessage": "error: 'ListNode' was not declared in this scope",
+    "code": "#include <stdio.h>\n...",
+    "submittedAt": "2026-06-05T10:30:00",
+    "runtimeMs": null,
+    "memoryKb": null
+  }]
 }
+
+// Response data.analysisId          — 唯一 ID (err_YYYYMMDD_hex8)
+// Response data.overallAssessment   — 综合诊断
+// Response data.errorCategories[]   — 错误分类 (type, count, rootCause, specificIssues, suggestions, isSystemic)
+// Response data.learningSuggestions[] — 学习建议 (topic, priority, reason, suggestedResources)
+// Response data.interventionTriggered — 是否需要干预
+// Response data.severity              — HIGH / MEDIUM / LOW
+// Response data.aiGenerated           — true=AI / false=规则引擎降级
 ```
-
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `studentId` | str | ✅ | 学号 |
-| `studentName` | str | ✅ | 姓名 |
-| `experimentId` | int | ✅ | 实验 ID |
-| `experimentName` | str | ✅ | 实验名称 |
-| `problemTitle` | str | ✅ | 题目标题 |
-| `problemDescription` | str | — | 题目描述（可选上下文） |
-| `submissions` | list | ✅ | 提交记录列表 |
-| `submissions[].attemptNo` | int | ✅ | 第几次提交（从1开始） |
-| `submissions[].judgeStatus` | str | ✅ | 判题状态：COMPILE_ERROR, RUNTIME_ERROR, WRONG_ANSWER, TIME_LIMIT_EXCEEDED, MEMORY_LIMIT_EXCEEDED, ACCEPTED |
-| `submissions[].compiler` | str | — | 编译器（GCC, G++） |
-| `submissions[].errorMessage` | str | — | 报错信息 |
-| `submissions[].code` | str | ✅ | 源代码 |
-| `submissions[].submittedAt` | str | — | 提交时间（ISO-8601） |
-
-**响应：**
-
-```json
-{
-  "code": 200,
-  "message": "success",
-  "data": {
-    "analysisId": "err_20260605_abc12345",
-    "overallAssessment": "该学生在链表操作上存在系统性问题...",
-    "errorCategories": [
-      {
-        "type": "COMPILE_ERROR",
-        "count": 2,
-        "rootCause": "对ListNode结构体定义不熟悉，未正确引用头文件",
-        "specificIssues": ["缺少结构体前向声明", "头文件引用顺序错误"],
-        "suggestions": ["复习结构体定义语法", "学习C语言头文件引用规范"],
-        "isSystemic": false
-      }
-    ],
-    "learningSuggestions": [
-      {
-        "topic": "链表边界处理",
-        "priority": "HIGH",
-        "reason": "连续5次提交中出现3次空指针问题",
-        "suggestedResources": "复习教材第3章链表基本操作"
-      }
-    ],
-    "interventionTriggered": true,
-    "interventionMessage": "检测到你已连续提交5次，建议暂停提交，先查看错误分析报告再继续。加油！",
-    "severity": "HIGH",
-    "aiGenerated": true
-  }
-}
-```
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `analysisId` | str | 分析唯一 ID |
-| `overallAssessment` | str | 综合诊断（中文） |
-| `errorCategories` | list | 错误分类 |
-| `errorCategories[].type` | str | 错误类型 |
-| `errorCategories[].count` | int | 出现次数 |
-| `errorCategories[].rootCause` | str | 根本原因 |
-| `errorCategories[].specificIssues` | list[str] | 具体问题 |
-| `errorCategories[].suggestions` | list[str] | 改进建议 |
-| `errorCategories[].isSystemic` | bool | 是否系统性薄弱点（≥3次） |
-| `learningSuggestions` | list | 学习建议 |
-| `learningSuggestions[].topic` | str | 知识点 |
-| `learningSuggestions[].priority` | str | 优先级：HIGH / MEDIUM / LOW |
-| `learningSuggestions[].reason` | str | 建议原因 |
-| `learningSuggestions[].suggestedResources` | str | 推荐资源 |
-| `interventionTriggered` | bool | 是否需要干预 |
-| `interventionMessage` | str | 给学生看的提示语 |
-| `severity` | str | HIGH / MEDIUM / LOW |
-| `aiGenerated` | bool | true=AI生成，false=规则引擎降级 |
 
 ---
 
 ### 2. POST `/analyze/warning` — AI 主动干预
 
-检测单个学生是否需要教学干预（触发条件：错误次数 > 5）。
+```
+触发条件: 错误次数 > 5（服务内部判断）
+串联逻辑: 如果后端传了 submissions/errorHistory/skillStates，内部自动调 /analyze/error + /analyze/learning
+返回: WarningResult（未触发）或 WarningCombinedData（触发时含三层嵌套结果）
+```
 
-**请求：**
-
+**基础请求（仅预警）：**
 ```json
 {
   "studentId": "20220101001",
@@ -163,63 +164,32 @@ uv run uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload
 }
 ```
 
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `studentId` | str | ✅ | 学号 |
-| `studentName` | str | ✅ | 姓名 |
-| `experimentId` | int | ✅ | 实验 ID |
-| `experimentName` | str | ✅ | 实验名称 |
-| `deadline` | str | — | 截止时间（ISO-8601） |
-| `totalSubmissions` | int | ✅ | 总提交次数 |
-| `acceptedCount` | int | ✅ | 已通过题数 |
-| `totalProblems` | int | ✅ | 总题数 |
-| `compileErrors` | int | ✅ | 编译错误次数 |
-| `runtimeErrors` | int | ✅ | 运行时错误次数 |
-| `wrongAnswers` | int | ✅ | 答案错误次数 |
-| `timeLimitExceeded` | int | ✅ | 超时次数 |
-| `lastSubmissionAt` | str | ✅ | 最近提交时间 |
-
-**响应：**
-
+**附加 submissions 时（触发串联）：**
 ```json
 {
-  "code": 200,
-  "message": "success",
-  "data": {
-    "studentId": "20220101001",
-    "level": "HIGH",
-    "triggered": true,
-    "warningType": "FREQUENT_FAILURE",
-    "warningMessage": "你已提交10次但通过率较低，建议暂停提交，先查看AI错误分析报告再继续。",
-    "teacherNote": "提交10次，通过率仅10%，需要重点关注。",
-    "suggestedActions": ["查看AI错误分析报告", "复习相关知识点", "向教师请教"],
-    "autoNotify": true,
-    "aiGenerated": true
-  }
+  // 以上所有字段 +
+  "submissions": [ /* 同 /analyze/error 的 submissions */ ],
+  "errorHistory": [{"errorType": "COMPILE_ERROR", "count": 3}],
+  "skillStates": [{"tagName": "指针", "masteryScore": 35.0, "attemptCount": 8}]
 }
 ```
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `studentId` | str | 学号 |
-| `level` | str | HIGH / MEDIUM / LOW / OK |
-| `triggered` | bool | 是否触发告警 |
-| `warningType` | str | FREQUENT_FAILURE / BASIC_SYNTAX / STUCK / DEADLINE_RISK / OK |
-| `warningMessage` | str | 给学生看的提示 |
-| `teacherNote` | str | 给老师看的备注 |
-| `suggestedActions` | list[str] | 建议措施 |
-| `autoNotify` | bool | 是否自动通知 |
-| `aiGenerated` | bool | AI or 规则引擎 |
+**串联返回（WarningCombinedData）：**
+```json
+{
+  "triggered": true,
+  "warning": { "level": "HIGH", "warningType": "FREQUENT_FAILURE", "warningMessage": "...", ... },
+  "errorAnalysis": { "analysisId": "...", "errorCategories": [...], ... },
+  "learningSuggestions": { "suggestionId": "...", "weakPoints": [...], ... }
+}
+```
 
 ---
 
 ### 3. POST `/analyze/learning` — AI 学习建议生成
 
-基于学生错误历史和技能状态，生成个性化学习建议。
-
-**请求：**
-
 ```json
+// Request
 {
   "studentId": "20220101001",
   "studentName": "张三",
@@ -231,120 +201,350 @@ uv run uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload
     {"tagName": "指针", "masteryScore": 35.0, "attemptCount": 8},
     {"tagName": "链表", "masteryScore": 60.0, "attemptCount": 5}
   ],
-  "previousRemark": "上次分析指出该生在指针使用方面存在困难..."
+  "previousRemark": null
 }
+
+// Response data.weakPoints[]    — 薄弱知识点 (tagName, severity, reason)
+// Response data.studyPlan[]     — 学习计划 (topic, priority, suggestedResources, estimatedTime)
+// Response data.summaryMessage  — 总结鼓励语
+// Response data.aiGenerated     — true/false
 ```
-
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `studentId` | str | ✅ | 学号 |
-| `studentName` | str | ✅ | 姓名 |
-| `errorHistory` | list | ✅ | 错误类型分布 |
-| `errorHistory[].errorType` | str | ✅ | 错误类型 |
-| `errorHistory[].count` | int | ✅ | 出现次数 |
-| `skillStates` | list | — | 技能掌握状态 |
-| `skillStates[].tagName` | str | ✅ | 技能标签（如"指针"、"链表"） |
-| `skillStates[].masteryScore` | float | ✅ | 掌握度 0-100 |
-| `skillStates[].attemptCount` | int | — | 练习次数 |
-| `previousRemark` | str | — | 上次AI评语 |
-
-**响应：**
-
-```json
-{
-  "code": 200,
-  "message": "success",
-  "data": {
-    "suggestionId": "lrn_20260605_abc12345",
-    "weakPoints": [
-      {
-        "tagName": "指针",
-        "severity": "HIGH",
-        "reason": "编译错误中5次涉及指针类型不匹配"
-      }
-    ],
-    "studyPlan": [
-      {
-        "topic": "指针基础",
-        "priority": "HIGH",
-        "suggestedResources": "教材第3章 指针与内存管理",
-        "estimatedTime": "1小时"
-      }
-    ],
-    "recommendedProblems": ["PTA同类题目练习", "教材课后习题"],
-    "summaryMessage": "根据你的提交记录分析...建议优先巩固指针基础，加油！",
-    "aiGenerated": true
-  }
-}
-```
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `suggestionId` | str | 建议唯一 ID |
-| `weakPoints` | list | 薄弱知识点 |
-| `weakPoints[].tagName` | str | 知识点名称 |
-| `weakPoints[].severity` | str | HIGH / MEDIUM / LOW |
-| `weakPoints[].reason` | str | 识别原因 |
-| `studyPlan` | list | 学习计划 |
-| `studyPlan[].topic` | str | 学习主题 |
-| `studyPlan[].priority` | str | HIGH / MEDIUM / LOW |
-| `studyPlan[].suggestedResources` | str | 推荐资源 |
-| `studyPlan[].estimatedTime` | str | 预估时间 |
-| `recommendedProblems` | list[str] | 推荐练习方向 |
-| `summaryMessage` | str | 总结鼓励语 |
-| `aiGenerated` | bool | AI or 规则引擎 |
 
 ---
 
-## 容错机制
+### 容错机制
 
-当 DeepSeek API 不可用时（网络错误、API Key 无效等），服务会自动降级到**规则引擎**：
-- 返回 200 状态码 + 完整的响应结构
-- `aiGenerated` 字段为 `false`
-- `overallAssessment` 中会标注「AI分析暂时不可用」
-- 错误分类和学习建议基于预定义的规则模板生成
-- 预警分析基于统计阈值判断，不依赖 AI
+DeepSeek 不可用时自动降级到规则引擎：返回 200 + `aiGenerated: false`，所有字段都有合理默认值。**后端无需特殊处理**。
 
-**Java 后端无需做任何特殊处理——接口始终返回有效的 JSON。**
+---
 
-## 开发
+## 后端集成详解
 
-```bash
-# 运行测试
-uv run pytest
-
-# 代码检查
-uv run ruff check .
-
-# 自动修复
-uv run ruff check --fix .
-```
-
-## 集成指南
-
-本服务为内部微服务，由 Java 后端调用，不直接暴露给前端。
-
-### 调用流程
+### 后端文件索引
 
 ```
-学生提交错误 → Java 后端检测
-  ├─ 调用 POST /analyze/error（错误分析）
-  ├─ 如果 error count > 5 → 调用 POST /analyze/warning（干预检测）
-  └─ 错误分析完成后 → 调用 POST /analyze/learning（学习建议）
+backend-repo/src/main/java/com/tap/backend/academic/
+├── controller/
+│   ├── ErrorAnalysisController.java     ← 对前端暴露 /api/analysis/*
+│   └── ApiController.java               ← submitExperiment() 异步触发
+├── service/
+│   ├── ErrorAnalysisService.java        ← 接口 (5个方法)
+│   └── impl/
+│       └── ErrorAnalysisServiceImpl.java ← 实现 (RestTemplate + 原生SQL)
+├── dao/
+│   └── teacherexperiment/
+│       └── TeacherExperimentQueryDao.java ← MyBatis 注解 SQL
+└── teacherexperiment/
+    └── TeacherSubmissionProblemRow.java   ← DTO 行对象
+
+backend-repo/src/main/resources/
+├── application.yml                       ← 默认配置
+├── application-dev.yml                   ← dev 覆盖 (密码 123456)
+└── application-local.yml                 ← local 覆盖 (error-analysis base-url)
 ```
 
-### Java 后端需准备的数据
+### 后端接口（Controller）
 
-三个接口的 request 数据均可从以下表获取：
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/api/analysis/health` | 健康检查 |
+| `POST` | `/api/analysis/error` | 错误分析（需 `{experimentId}`） |
+| `POST` | `/api/analysis/warning` | 预警分析（需 `{experimentId}`） |
+| `POST` | `/api/analysis/learning` | 学习建议 |
+| `POST` | `/api/analysis/intervention` | 主动干预全流程 |
 
-| 数据 | 来源表 |
-|------|--------|
-| 提交记录（状态、编译器等） | `student_problem_attempt` |
-| 报错信息 | `pta_raw_submission_row` |
-| 源代码 | `artifact.text_content`（通过 `student_problem_state.latest_code_artifact_id`） |
-| 学生技能状态 | `student_skill_state` |
-| 历史评语 | `ai_remarks` |
+所有接口通过 `StudentSessionResolver` 从 HTTP Session 取 `studentId`，**必须先 POST `/api/login` 拿 cookie**。
 
-### 存储方案
+### 后端调用微服务方式
 
-Java 后端可根据返回的 JSON 自行建表存储分析结果，本服务不持久化任何数据。
+```java
+// ErrorAnalysisServiceImpl.java 第 53 行
+private final RestTemplate restTemplate = new RestTemplate();
+
+// 第 50 行 — 微服务地址
+@Value("${tap.error-analysis.base-url:http://127.0.0.1:8002}")
+private String errorAnalysisBaseUrl;
+
+// 第 128 行 — 实际调用
+String url = errorAnalysisBaseUrl + "/analyze/error";
+Map<String, Object> responseBody = restTemplate.postForEntity(url, entity, Map.class).getBody();
+// 从 {code, message, data} 里取 data 部分返回
+return (Map<String, Object>) responseBody.get("data");
+```
+
+### 数据库查询详解
+
+#### 主查询：`findSubmissionProblemRows()` (DAO 219-242行)
+
+```sql
+SELECT
+  CAST(ap.sort_order AS SIGNED) AS sortOrder,
+  ap.problem_no    AS problemNo,
+  ap.title         AS problemTitle,
+  sps.latest_status   AS latestStatus,
+  sps.best_score      AS bestScore,
+  sps.attempt_count   AS attemptCount,
+  spa.submitted_at    AS submitTime,
+  code_artifact.text_content AS code
+FROM student_profile sp
+JOIN student_problem_state sps
+  ON sps.student_id = sp.id
+ AND sps.offering_id = #{experimentId}
+JOIN assignment_problem ap ON ap.id = sps.problem_id
+LEFT JOIN student_problem_attempt spa ON spa.id = sps.latest_attempt_id   -- ⚠️ 只有最后一次
+LEFT JOIN artifact code_artifact ON code_artifact.id = sps.latest_code_artifact_id
+WHERE sp.student_no = #{studentId}
+ORDER BY ap.sort_order, ap.id
+```
+
+**涉及的表**: `student_profile`, `student_problem_state`, `assignment_problem`, `student_problem_attempt`, `artifact`
+
+#### 补充查询（ErrorAnalysisServiceImpl 中的 Native SQL）
+
+| 方法 | 行号 | 查的表 | 取的字段 |
+|------|------|--------|---------|
+| `resolveStudentName()` | 569-581 | `student_profile` | `real_name` |
+| 查实验名称 | 83-88 | `assignment_offering` + `assignment_template` | `title` |
+| 查截止日期 | 482-489 | `assignment_offering` | `deadline_at` |
+| `countErrorsFromAttempts()` | 221-238 | `student_problem_attempt` + `student_profile` | `COUNT(*)` (非 ACCEPTED) |
+| `querySubmissionStats()` | 408-506 | 用 `findSubmissionProblemRows` 结果 + Java 端统计 | 编译/运行/答案错误/超时次数 |
+| `queryErrorDistribution()` | 511-535 | `student_problem_state` + `student_problem_attempt` + `student_profile` | `judge_status`, `COUNT(*)` |
+| `querySkillStatesByStudentNo()` | 540-563 | `student_skill_state` + `student_profile` | `tag_name`, `mastery_score`, `attempt_count` |
+| `getLatestExperimentId()` | 586-601 | `student_problem_state` + `student_profile` | `offering_id` |
+
+### 异步触发流程
+
+```
+ApiController.submitExperiment()  (POST /experiments/{id}/submit)
+  │  保存提交成功后
+  └→ CompletableFuture.runAsync()
+       │
+       ├─ errorCount >= 6 → proactiveIntervention()
+       │    ├─ analyzeErrors()      → POST :8002/analyze/error
+       │    ├─ generateLearningSuggestions() → POST :8002/analyze/learning
+       │    └─ checkWarning()       → POST :8002/analyze/warning
+       │
+       └─ errorCount > 0 → analyzeErrors()
+            └─ POST :8002/analyze/error
+```
+
+### 当前数据缺口
+
+| 字段 | 数据库里有？ | 哪张表 | 当前拿到没 |
+|------|:----:|--------|:----:|
+| `studentId` | ✅ | `student_profile.student_no` | ✅ |
+| `studentName` | ✅ | `student_profile.real_name` | ✅ |
+| `experimentName` | ✅ | `assignment_template.title` | ✅ |
+| `problemTitle` | ✅ | `assignment_problem.title` | ✅ |
+| `problemDescription` | ❌ | — | ❌ 写死为 null |
+| `judgeStatus` | ✅ | `student_problem_state.latest_status` | ⚠️ 只有最后一次 |
+| `compiler` | ✅ | `student_problem_attempt.compiler` | ❌ 写死为 "GCC" |
+| `errorMessage` | ✅ | `pta_raw_submission_row.raw_json` | ❌ 写死为 null |
+| `code` | ✅ | `artifact.text_content` | ⚠️ 只有最后一次 |
+| `submittedAt` | ✅ | `student_problem_attempt.submitted_at` | ⚠️ 只有最后一次 |
+| `runtimeMs` | ✅ | `student_problem_attempt.runtime_ms` | ❌ 没传 |
+| `memoryKb` | ✅ | `student_problem_attempt.memory_kb` | ❌ 没传 |
+
+> **关键外键链**: `student_problem_attempt.raw_row_id` → `pta_raw_submission_row.id` → `raw_json` (含完整报错信息)，当前没走这条链。
+
+---
+
+## 前端集成详解
+
+### 前端文件索引
+
+```
+fronted-repo/src/
+├── api/
+│   └── index.js                                    ← API 函数定义 (334-343行)
+│
+├── views/student/
+│   ├── Dashboard.vue                                ← 调用 getWarningAnalysis() (222行)
+│   │   └── <WarningBanner />                        ← 预警横幅 (8行)
+│   ├── LearningAnalysis.vue                         ← 调用 analyzeError() (389行)
+│   │   └── <ErrorAnalysisCard />                    ← 错误分析卡片 (174行)
+│   ├── Practice.vue                                 ← 调用 getLearningSuggestions() (659行)
+│   │   └── 展示 weakPoints 标签
+│   └── components/
+│       ├── WarningBanner.vue                        ← 预警横幅组件
+│       └── ErrorAnalysisCard.vue                    ← 错误分析卡片组件
+│
+└── router/
+    └── index.js                                     ← 路由定义 (/student/*)
+```
+
+### 前端 API 函数
+
+```javascript
+// fronted-repo/src/api/index.js 第 334-343 行
+
+async analyzeError(payload) {
+  return apiClient.post('/api/analysis/error', payload, { timeout: 60000 })
+}
+
+async getWarningAnalysis(payload) {
+  return apiClient.post('/api/analysis/warning', payload, { timeout: 60000 })
+}
+
+async getLearningSuggestions(payload) {
+  return apiClient.post('/api/analysis/learning', payload, { timeout: 60000 })
+}
+```
+
+### 前端调用位置
+
+| 页面 URL | 页面文件 | 调用的 API | 传了什么 | 渲染组件 |
+|---------|---------|-----------|---------|---------|
+| `/student/dashboard` | `Dashboard.vue:222` | `getWarningAnalysis()` | `{studentId}` | `WarningBanner` |
+| `/student/learning-analysis` | `LearningAnalysis.vue:389` | `analyzeError()` | `{studentId}` | `ErrorAnalysisCard` |
+| `/student/practice` | `Practice.vue:659` | `getLearningSuggestions()` | `{studentId}` | weakPoints 标签 |
+
+### Vue DevServer 代理（vue.config.js）
+
+```javascript
+// /api/*   → http://localhost:8081   (所有 API 走后端)
+// /error-analysis/* → http://127.0.0.1:8002  (直连微服务，备用)
+```
+
+> ⚠️ **当前问题**: 前端只传 `{studentId}` 没传 `experimentId`，error 和 warning 接口会 400。Learning 接口不强制需要 experimentId。
+
+---
+
+## Postman 测试指南
+
+### 第 1 步：登录获取 Session
+
+```
+POST http://localhost:8081/api/login
+Content-Type: application/json
+
+{
+    "username": "你的账号",
+    "password": "你的密码",
+    "role": "student"
+}
+```
+
+返回 `{"success": true, ...}`，同时 Response Headers 里有 `Set-Cookie: JSESSIONID=xxx`。Postman 自动保存，后续请求不需要手动带。
+
+### 第 2 步：查数据库获取测试参数
+
+```sql
+-- 找实验 ID
+SELECT ao.id, at.title
+FROM assignment_offering ao
+JOIN assignment_template at ON at.id = ao.template_id
+LIMIT 5;
+
+-- 找学生学号
+SELECT student_no, real_name FROM student_profile LIMIT 5;
+```
+
+### 第 3 步：测试三个接口
+
+**错误分析：**
+```
+POST http://localhost:8081/api/analysis/error
+Content-Type: application/json
+
+{
+    "studentId": "查到的学号",
+    "experimentId": 查到的实验ID
+}
+```
+
+**预警分析：**
+```
+POST http://localhost:8081/api/analysis/warning
+Content-Type: application/json
+
+{
+    "studentId": "查到的学号",
+    "experimentId": 查到的实验ID
+}
+```
+
+**学习建议：**
+```
+POST http://localhost:8081/api/analysis/learning
+Content-Type: application/json
+
+{}
+```
+（studentId 从 session 自动取）
+
+### 第 4 步：直连微服务测试（跳过认证）
+
+如果不走后端代理，直接调微服务（不需要登录）：
+
+```
+POST http://localhost:8002/analyze/error
+Content-Type: application/json
+
+{
+    "studentId": "2024001",
+    "studentName": "测试",
+    "experimentId": 1,
+    "experimentName": "测试实验",
+    "problemTitle": "链表反转",
+    "submissions": [{
+        "attemptNo": 1,
+        "judgeStatus": "COMPILE_ERROR",
+        "compiler": "gcc",
+        "errorMessage": "error: missing ';'",
+        "code": "int main() { return 0 }",
+        "submittedAt": "2026-06-10T09:00:00"
+    }]
+}
+```
+
+---
+
+## 项目路径总览
+
+```
+D:/IDEA/Ptaapps/
+├── error-analysis-service/          ← 你的微服务 (3号负责)
+│   ├── app/
+│   │   ├── main.py                  ← FastAPI 入口
+│   │   ├── api/
+│   │   │   ├── error_analyze.py     ← POST /analyze/error
+│   │   │   ├── warning_analyze.py   ← POST /analyze/warning
+│   │   │   └── learning_suggest.py  ← POST /analyze/learning
+│   │   ├── schemas/
+│   │   │   └── requests.py          ← 所有 Pydantic 模型
+│   │   ├── services/
+│   │   │   ├── error_analyzer.py    ← 错误分析逻辑
+│   │   │   ├── warning_detector.py  ← 预警检测 + 内部串联
+│   │   │   ├── learning_advisor.py  ← 学习建议生成
+│   │   │   └── deepseek_client.py   ← DeepSeek HTTP 客户端
+│   │   └── core/
+│   │       ├── config.py            ← Settings (env)
+│   │       └── responses.py         ← ApiResponse[T] 统一响应
+│   ├── .env                         ← API Key 配置
+│   └── .env.example
+│
+├── backend-repo/                    ← Java 后端 (1号负责)
+│   └── src/main/
+│       ├── java/com/tap/backend/academic/
+│       │   ├── controller/ErrorAnalysisController.java
+│       │   ├── service/ErrorAnalysisService.java
+│       │   ├── service/impl/ErrorAnalysisServiceImpl.java
+│       │   └── dao/teacherexperiment/TeacherExperimentQueryDao.java
+│       └── resources/
+│           ├── db/migration/        ← 数据库迁移脚本
+│           ├── application.yml
+│           └── application-dev.yml
+│
+└── fronted-repo/                    ← Vue 前端 (6号负责)
+    └── src/
+        ├── api/index.js             ← API 函数
+        ├── views/student/
+        │   ├── Dashboard.vue
+        │   ├── LearningAnalysis.vue
+        │   ├── Practice.vue
+        │   └── components/
+        │       ├── WarningBanner.vue
+        │       └── ErrorAnalysisCard.vue
+        └── router/index.js
+```
