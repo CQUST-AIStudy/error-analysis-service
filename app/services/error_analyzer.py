@@ -49,7 +49,7 @@ ERROR_ANALYSIS_SYSTEM_PROMPT = """你是重庆科技大学数据结构课程的A
       "topic": "知识点名称",
       "priority": "HIGH",
       "reason": "建议原因（中文）",
-      "suggestedResources": "推荐学习资源（如教材章节）"
+      "suggestedResources": "推荐练习方向或在线资源"
     }
   ],
   "interventionTriggered": true,
@@ -248,7 +248,7 @@ def _infer_suggestions_from_errors(request: ErrorAnalysisRequest) -> list[Learni
         suggestions.append(LearningSuggestion(
             topic="基础语法", priority="MEDIUM",
             reason="存在多次提交错误，建议从基础知识点排查",
-            suggestedResources="复习教材对应章节，完成PTA基础练习",
+            suggestedResources="针对性地练习相关题目，巩固基础知识点",
         ))
     return suggestions
 
@@ -298,7 +298,7 @@ def _generic_suggestions(error_type: str) -> list[str]:
             "检查动态内存分配是否成功",
         ],
     }
-    return suggestions_map.get(error_type, ["分析错误信息，定位问题根源", "查阅教材相关章节", "向教师或同学请教"])
+    return suggestions_map.get(error_type, ["分析错误信息，定位问题根源", "针对性地练习相关题目", "向教师或同学请教"])
 
 
 # ── Main analysis function ──────────────────────────────
