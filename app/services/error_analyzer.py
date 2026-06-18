@@ -12,6 +12,11 @@ from app.schemas.requests import (
     SubmissionRecord,
 )
 from app.services.deepseek_client import DeepSeekClient
+from app.services.learning_advisor import SKILL_TAG_MAP
+
+# Build Chinese name list for AI prompt constraint
+_SKILL_CHINESE_NAMES = [v[0] for v in SKILL_TAG_MAP.values()]
+_SKILL_TAGS_CSV = "、".join(_SKILL_CHINESE_NAMES)
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +55,10 @@ ERROR_ANALYSIS_SYSTEM_PROMPT = """你是重庆科技大学数据结构课程的A
   "interventionTriggered": true,
   "interventionMessage": "面向学生的干预提示语（温和鼓励的语气，≤80字）",
   "severity": "HIGH"
-}"""
+}
+
+重要：learningSuggestions.topic 必须从以下知识点标签中选择：
+""" + _SKILL_TAGS_CSV
 
 
 def _build_error_analysis_prompt(request: ErrorAnalysisRequest) -> str:
@@ -99,7 +107,10 @@ def _build_error_analysis_prompt(request: ErrorAnalysisRequest) -> str:
 提交历史（共{total}次）：
 {"".join(submission_entries)}
 
-请根据以上提交记录，分析该学生的错误原因并生成学习建议（严格按JSON格式输出）。"""
+当前技能掌握度（来自student_skill_state表）：
+""" + (_format_skill_states(request) or "（无技能状态数据）") + f"""
+
+请根据以上提交记录和技能掌握度，分析该学生的错误原因并生成学习建议（严格按JSON格式输出）。"""
     return prompt
 
 
@@ -111,6 +122,31 @@ def _truncate_code(code: str, max_lines: int = 3000) -> str:
     if len(lines) > max_lines:
         return "\n".join(lines[:max_lines]) + f"\n\n... [代码过长，已截断，原{len(lines)}行仅保留前{max_lines}行]"
     return code
+
+
+def _first_submission_code(request: ErrorAnalysisRequest) -> str | None:
+    """Return code text of the first/latest submission for frontend display."""
+    if request.submissions:
+        return request.submissions[0].code or None
+    return None
+
+
+def _first_submission_status(request: ErrorAnalysisRequest) -> str | None:
+    """Return judge status of the first/latest submission for frontend display."""
+    if request.submissions:
+        return request.submissions[0].judge_status or None
+    return None
+
+
+def _format_skill_states(request: ErrorAnalysisRequest) -> str | None:
+    """Format skill states for the AI prompt (Chinese names via SKILL_TAG_MAP)."""
+    if not request.skill_states:
+        return None
+    lines = []
+    for sk in request.skill_states[:10]:  # top 10
+        chinese_name, _ = SKILL_TAG_MAP.get(sk.tag_name, (sk.tag_name, ""))
+        lines.append(f"- {chinese_name}: 掌握度{sk.mastery_score:.0f}/100, 练习{sk.attempt_count}次")
+    return "\n".join(lines)
 
 
 # ── Rule-based fallback analysis (no AI) ─────────────────
@@ -139,14 +175,17 @@ def _rule_based_fallback(request: ErrorAnalysisRequest) -> ErrorAnalysisData:
 
     total = len(request.submissions)
     ac_count = len(error_stats.get("ACCEPTED", []))
-    triggered = total > 5 and ac_count < total * 0.3
+    triggered = total > 3 and ac_count < total * 0.3
+
+    # Generate learning suggestions from skillStates or error types
+    learning_suggestions = _generate_fallback_suggestions(request)
 
     return ErrorAnalysisData(
         analysisId=f"err_{datetime.now().strftime('%Y%m%d')}_{uuid.uuid4().hex[:8]}",
         overallAssessment=f"该学生在{request.experiment_name or '本次实验'}中共提交{total}次，"
         f"通过{ac_count}次。AI分析暂时不可用，以下为基于规则的分析。",
         errorCategories=error_categories,
-        learningSuggestions=[],
+        learningSuggestions=learning_suggestions,
         interventionTriggered=triggered,
         interventionMessage=(
             f"检测到你已连续提交{total}次，建议暂停提交，先仔细分析错误原因再继续。"
@@ -155,7 +194,63 @@ def _rule_based_fallback(request: ErrorAnalysisRequest) -> ErrorAnalysisData:
         ),
         severity="HIGH" if triggered else ("MEDIUM" if error_categories else "LOW"),
         aiGenerated=False,
+        latestCode=_first_submission_code(request),
+        latestJudgeStatus=_first_submission_status(request),
     )
+
+
+def _generate_fallback_suggestions(request: ErrorAnalysisRequest) -> list[LearningSuggestion]:
+    """Generate learning suggestions from skillStates (preferred) or error types."""
+    if request.skill_states:
+        # Use weakest 3 skills
+        sorted_skills = sorted(request.skill_states, key=lambda s: s.mastery_score)[:3]
+        suggestions = []
+        for sk in sorted_skills:
+            chinese_name, resource = SKILL_TAG_MAP.get(sk.tag_name, (sk.tag_name, "针对性地巩固相关知识"))
+            if sk.mastery_score < 30:
+                priority, reason = "HIGH", f"{chinese_name}掌握度仅{sk.mastery_score:.0f}分，急需系统性学习"
+            elif sk.mastery_score < 60:
+                priority, reason = "MEDIUM", f"{chinese_name}掌握度{sk.mastery_score:.0f}分，需要针对性强化练习"
+            else:
+                priority, reason = "LOW", f"{chinese_name}掌握度{sk.mastery_score:.0f}分，尚有提升空间"
+            suggestions.append(LearningSuggestion(
+                topic=chinese_name, priority=priority, reason=reason, suggestedResources=resource,
+            ))
+        return suggestions
+    else:
+        # Infer from error types
+        return _infer_suggestions_from_errors(request)
+
+
+def _infer_suggestions_from_errors(request: ErrorAnalysisRequest) -> list[LearningSuggestion]:
+    """Infer likely skill weaknesses from error type distribution."""
+    error_to_skills: dict[str, list[str]] = {
+        "COMPILE_ERROR": ["数组", "字符串", "排序"],
+        "RUNTIME_ERROR": ["链表", "栈", "深度优先搜索"],
+        "WRONG_ANSWER": ["查找", "贪心", "动态规划"],
+        "TIME_LIMIT_EXCEEDED": ["排序", "二分查找", "动态规划"],
+        "MEMORY_LIMIT_EXCEEDED": ["堆", "并查集", "字典树"],
+    }
+    seen: set[str] = set()
+    suggestions: list[LearningSuggestion] = []
+    for sub in request.submissions[:5]:
+        status = sub.judge_status.upper() if sub.judge_status else "UNKNOWN"
+        for skill_name in error_to_skills.get(status, []):
+            if skill_name not in seen and len(suggestions) < 3:
+                seen.add(skill_name)
+                suggestions.append(LearningSuggestion(
+                    topic=skill_name,
+                    priority="MEDIUM",
+                    reason=f"根据{status}错误类型推断，{skill_name}可能是薄弱环节",
+                    suggestedResources=f"建议练习PTA-{skill_name}专题，巩固相关知识点",
+                ))
+    if not suggestions:
+        suggestions.append(LearningSuggestion(
+            topic="基础语法", priority="MEDIUM",
+            reason="存在多次提交错误，建议从基础知识点排查",
+            suggestedResources="复习教材对应章节，完成PTA基础练习",
+        ))
+    return suggestions
 
 
 def _describe_error_type(error_type: str) -> str:
@@ -265,6 +360,8 @@ def analyze_errors(request: ErrorAnalysisRequest, deepseek: DeepSeekClient) -> E
             interventionMessage=result.get("interventionMessage"),
             severity=result.get("severity", "LOW"),
             aiGenerated=True,
+            latestCode=_first_submission_code(request),
+            latestJudgeStatus=_first_submission_status(request),
         )
     except Exception as e:
         logger.error("Failed to parse AI response: %s", e, exc_info=True)

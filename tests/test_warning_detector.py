@@ -122,7 +122,7 @@ class TestAnalyzeWarning:
         assert result.triggered is False
 
     def test_medium_stuck(self, empty_key_client):
-        r = make_request(total=10, ac=2, total_problems=5, compile_err=0, runtime_err=4, wrong=4)
+        r = make_request(total=10, ac=4, total_problems=5, compile_err=0, runtime_err=4, wrong=2)
         result = analyze_warning(r, empty_key_client)
         assert result.level == "MEDIUM"
         assert result.warning_type == "STUCK"

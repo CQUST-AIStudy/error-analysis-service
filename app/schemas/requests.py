@@ -113,6 +113,11 @@ class ErrorAnalysisRequest(BaseSchema):
         min_length=1,
         description="Submission history for this student on this problem",
     )
+    skill_states: list[SkillState] = Field(
+        default_factory=list,
+        alias="skillStates",
+        description="Current skill mastery states (from student_skill_state table)",
+    )
 
 
 class ErrorCategory(BaseSchema):
@@ -200,6 +205,16 @@ class ErrorAnalysisData(BaseSchema):
         default=True,
         alias="aiGenerated",
         description="True if AI produced this analysis; false = rule-engine fallback",
+    )
+    latest_code: str | None = Field(
+        None,
+        alias="latestCode",
+        description="Latest submitted source code for frontend display",
+    )
+    latest_judge_status: str | None = Field(
+        None,
+        alias="latestJudgeStatus",
+        description="Judge status of the latest submission (e.g. COMPILE_ERROR, WRONG_ANSWER)",
     )
 
 
