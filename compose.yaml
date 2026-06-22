@@ -1,0 +1,42 @@
+name: error-analysis-service
+
+services:
+  error-analysis-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: error-analysis-service:latest
+    container_name: error-analysis-service
+    restart: unless-stopped
+    ports:
+      - "${SERVICE_PORT:-8002}:8002"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      SERVICE_HOST: 0.0.0.0
+      SERVICE_PORT: 8002
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-flash}
+      REQUEST_TIMEOUT: ${REQUEST_TIMEOUT:-30}
+      MAX_CODE_LINES: ${MAX_CODE_LINES:-3000}
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=3).read()",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - pta-services
+
+networks:
+  pta-services:
+    name: pta-services
+    driver: bridge

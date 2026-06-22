@@ -230,7 +230,7 @@ def _error_based_suggestions(
         suggestionId=suggestion_id,
         weakPoints=weak_points,
         studyPlan=study_plan,
-        recommendedProblems=["PTA同类题目练习", "在线评测平台同类题目"],
+        recommendedProblems=["PTA同类题目练习", "教材课后习题", "在线评测平台同类题目"],
         summaryMessage=summary,
         aiGenerated=False,
     )

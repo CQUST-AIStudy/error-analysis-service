@@ -257,6 +257,6 @@ class TestSkillTagMap:
 
     def test_each_tag_has_chinese_name_and_resource(self):
         """Every entry must be (chinese_name, resource_string)."""
-        for tag, (name, resource) in SKILL_TAG_MAP.items():
+        for _tag, (name, resource) in SKILL_TAG_MAP.items():
             assert isinstance(name, str) and len(name) > 0
             assert isinstance(resource, str) and len(resource) > 10

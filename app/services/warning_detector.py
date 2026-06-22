@@ -1,6 +1,6 @@
 """Learning warning detection — simplified, self-contained.
 
-Rule: total submissions >= 3 → trigger warning.
+Rule: failed submissions require warning analysis; all-accepted submissions stay OK.
 AI path: DeepSeek evaluates severity when API key available.
 Rule path: simple threshold fallback.
 """
@@ -57,12 +57,27 @@ def _build_warning_prompt(request: WarningAnalyzeRequest) -> str:
 
 # ── Rule engine (no AI needed) ───────────────────────────
 
-def _rule_based_warning(request: WarningAnalyzeRequest) -> WarningResult:
-    """Simple rule: total_submissions >= 3 → trigger."""
-    total = max(request.total_submissions, 1)
-    triggered = total >= 3
+def _needs_ai_analysis(request: WarningAnalyzeRequest) -> bool:
+    """Return whether the submission statistics include warning-worthy failures."""
+    total = max(request.total_submissions, 0)
+    if total == 0:
+        return False
+    if request.accepted_count >= total:
+        return False
+    failure_count = (
+        request.compile_errors
+        + request.runtime_errors
+        + request.wrong_answers
+        + request.time_limit_exceeded
+    )
+    return failure_count > 0
 
-    if not triggered:
+
+def _rule_based_warning(request: WarningAnalyzeRequest) -> WarningResult:
+    """Classify warning severity using local submission statistics."""
+    total = max(request.total_submissions, 1)
+
+    if not _needs_ai_analysis(request):
         return WarningResult(
             studentId=request.student_id,
             level="OK", triggered=False, warningType="OK",
@@ -76,8 +91,14 @@ def _rule_based_warning(request: WarningAnalyzeRequest) -> WarningResult:
     ac_rate = (ac / total * 100) if total > 0 else 0
     if total >= 10 and ac_rate < 30:
         level, wtype = "HIGH", "FREQUENT_FAILURE"
-    elif request.compile_errors > request.runtime_errors:
+    elif request.compile_errors > 0 and request.compile_errors >= max(
+        request.runtime_errors,
+        request.wrong_answers,
+        request.time_limit_exceeded,
+    ):
         level, wtype = "MEDIUM", "BASIC_SYNTAX"
+    elif request.runtime_errors > 0 or request.wrong_answers > 0 or request.time_limit_exceeded > 0:
+        level, wtype = "MEDIUM", "STUCK"
     else:
         level, wtype = "MEDIUM", "FREQUENT_FAILURE"
 
@@ -98,11 +119,12 @@ def analyze_warning(request: WarningAnalyzeRequest, deepseek: DeepSeekClient):
     """Run warning detection.
 
     Flow:
-    1. total_submissions == 0  →  OK (no data)
-    2. total_submissions < 3   →  OK (below threshold)
-    3. AI available            →  DeepSeek analysis
-    4. AI unavailable          →  rule engine
-    5. If triggered + submissions present → chain error+learning
+    1. total_submissions == 0       → OK (no data)
+    2. no failed submission signals → OK
+    3. total_submissions < 3        → LOW (below threshold)
+    4. AI available                 → DeepSeek analysis
+    5. AI unavailable               → rule engine
+    6. If triggered + submissions present → chain error+learning
     """
     total = max(request.total_submissions, 0)
 
@@ -122,6 +144,16 @@ def analyze_warning(request: WarningAnalyzeRequest, deepseek: DeepSeekClient):
         request.compile_errors, request.runtime_errors,
         request.wrong_answers, request.time_limit_exceeded,
     )
+
+    # ── No failure signals ──
+    if not _needs_ai_analysis(request):
+        logger.info("Warning: student=%s has no failed submission signals, returning OK", request.student_id)
+        return WarningResult(
+            studentId=request.student_id, level="OK", triggered=False,
+            warningType="OK", warningMessage="当前表现正常，请继续保持。",
+            teacherNote=None, suggestedActions=[], autoNotify=False,
+            aiGenerated=False,
+        )
 
     # ── Below threshold ──
     if total < 3:

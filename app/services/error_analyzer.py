@@ -108,7 +108,7 @@ def _build_error_analysis_prompt(request: ErrorAnalysisRequest) -> str:
 {"".join(submission_entries)}
 
 当前技能掌握度（来自student_skill_state表）：
-""" + (_format_skill_states(request) or "（无技能状态数据）") + f"""
+""" + (_format_skill_states(request) or "（无技能状态数据）") + """
 
 请根据以上提交记录和技能掌握度，分析该学生的错误原因并生成学习建议（严格按JSON格式输出）。"""
     return prompt

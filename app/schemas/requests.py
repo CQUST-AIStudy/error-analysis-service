@@ -307,12 +307,12 @@ class WarningAnalyzeRequest(BaseSchema):
         None,
         description="Optional: full submission records with code for internal chaining to /analyze/error",
     )
-    error_history: list["ErrorTypeCount"] | None = Field(
+    error_history: list[ErrorTypeCount] | None = Field(
         None,
         alias="errorHistory",
         description="Optional: error type distribution for internal chaining to /analyze/learning",
     )
-    skill_states: list["SkillState"] | None = Field(
+    skill_states: list[SkillState] | None = Field(
         None,
         alias="skillStates",
         description="Optional: skill mastery states for internal chaining to /analyze/learning",

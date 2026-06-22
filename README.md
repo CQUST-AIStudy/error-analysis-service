@@ -19,24 +19,39 @@ AI 驱动的代码错误分析微服务，为 PTA 教学辅助系统提供错误
 
 ## 快速启动
 
+### Docker 一键部署（推荐）
+
 ```bash
-cd D:/IDEA/Ptaapps/error-analysis-service
+cd F:/WorkSpace/Coding/CQUST-AIStudy/error-analysis-service
 
-# 1. 创建虚拟环境 & 安装依赖
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-
-# 2. 配置环境变量
+# 1. 配置环境变量
 cp .env.example .env
 # 编辑 .env 填入 DEEPSEEK_API_KEY（没有 key 也能启动，走规则引擎降级）
 
-# 3. 启动
-uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload
+# 2. 构建并启动
+docker compose up -d --build
+
+# 3. 查看状态与日志
+docker compose ps
+docker compose logs error-analysis-service
 ```
 
 - 健康检查：`GET http://127.0.0.1:8002/health`
 - Swagger 文档：`http://127.0.0.1:8002/docs`
+- 停止服务：`docker compose down`
+- Java 后端在宿主机运行时，微服务地址使用 `http://127.0.0.1:8002`
+- Java 后端在同一 Docker network 内运行时，微服务地址使用 `http://error-analysis-service:8002`
+
+### 本地开发启动
+
+```bash
+cd F:/WorkSpace/Coding/CQUST-AIStudy/error-analysis-service
+
+uv sync
+Copy-Item .env.example .env
+
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload
+```
 
 ---
 
@@ -97,9 +112,11 @@ uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload
 |------|--------|------|
 | `DEEPSEEK_API_KEY` | — | DeepSeek API Key（为空时走规则引擎降级） |
 | `DEEPSEEK_BASE_URL` | `https://api.deepseek.com/v1` | API 地址 |
-| `DEEPSEEK_MODEL` | `deepseek-chat` | 模型名称 |
+| `DEEPSEEK_MODEL` | `deepseek-v4-flash` | 模型名称 |
 | `SERVICE_HOST` | `0.0.0.0` | 监听地址 |
-| `SERVICE_PORT` | `8002` | 服务端口 |
+| `SERVICE_PORT` | `8002` | 服务端口；Docker 部署时也作为宿主机暴露端口 |
+| `REQUEST_TIMEOUT` | `30` | DeepSeek 请求超时时间（秒） |
+| `MAX_CODE_LINES` | `3000` | 单次分析保留的最大代码行数 |
 
 ---
 
