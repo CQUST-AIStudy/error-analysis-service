@@ -109,9 +109,9 @@ class ErrorAnalysisRequest(BaseSchema):
         description="Problem statement for AI context",
     )
     submissions: list[SubmissionRecord] = Field(
-        ...,
-        min_length=1,
-        description="Submission history for this student on this problem",
+        default_factory=list,
+        alias="submissions",
+        description="Submission history for this student on this problem (empty when no submissions yet)",
     )
     skill_states: list[SkillState] = Field(
         default_factory=list,

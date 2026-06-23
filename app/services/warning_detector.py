@@ -20,6 +20,35 @@ from app.services.deepseek_client import DeepSeekClient
 
 logger = logging.getLogger(__name__)
 
+# ── AI typo normalization ──────────────────────────────────
+
+# DeepSeek sometimes returns typos in warningType literal values.
+# Correct them instead of falling back to rule engine.
+_WARNING_TYPE_ALIASES: dict[str, str] = {
+    "FREQUENCY_FAILURE": "FREQUENT_FAILURE",
+    "FREQUENCY": "FREQUENT_FAILURE",
+    "BASIC_SYNTAX_ERROR": "BASIC_SYNTAX",
+    "SYNTAX": "BASIC_SYNTAX",
+    "STUCK_PROGRESS": "STUCK",
+    "BLOCKED": "STUCK",
+    "DEADLINE": "DEADLINE_RISK",
+}
+
+
+def _normalize_warning_type(raw: str | None) -> str:
+    """Correct common AI typos in warningType to valid Literal values."""
+    if not raw:
+        return "OK"
+    normalized = raw.strip().upper()
+    if normalized in ("FREQUENT_FAILURE", "BASIC_SYNTAX", "STUCK", "DEADLINE_RISK", "OK"):
+        return normalized
+    if normalized in _WARNING_TYPE_ALIASES:
+        corrected = _WARNING_TYPE_ALIASES[normalized]
+        logger.info("Corrected AI warningType typo: %s → %s", raw, corrected)
+        return corrected
+    logger.warning("Unknown warningType from AI: %s, defaulting to FREQUENT_FAILURE", raw)
+    return "FREQUENT_FAILURE"
+
 # ── AI prompt ────────────────────────────────────────────
 
 WARNING_SYSTEM_PROMPT = """你是重庆科技大学的学习预警分析师。基于学生的提交统计数据，判断预警等级。
@@ -185,7 +214,7 @@ def analyze_warning(request: WarningAnalyzeRequest, deepseek: DeepSeekClient):
                     studentId=request.student_id,
                     level=result.get("level", "MEDIUM"),
                     triggered=result.get("triggered", True),
-                    warningType=result.get("warningType", "FREQUENT_FAILURE"),
+                    warningType=_normalize_warning_type(result.get("warningType")),
                     warningMessage=result.get("warningMessage", ""),
                     teacherNote=result.get("teacherNote"),
                     suggestedActions=result.get("suggestedActions", []),

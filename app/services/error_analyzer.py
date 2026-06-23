@@ -58,7 +58,13 @@ ERROR_ANALYSIS_SYSTEM_PROMPT = """你是重庆科技大学数据结构课程的A
 }
 
 重要：learningSuggestions.topic 必须从以下知识点标签中选择：
-""" + _SKILL_TAGS_CSV
+""" + _SKILL_TAGS_CSV + """
+
+特殊情况：如果所有提交都通过了判题（全部 ACCEPTED），仍然需要给出有价值的分析：
+1. 代码质量评价（命名规范、结构清晰度、可读性）
+2. 性能优化建议（时间/空间复杂度优化方向，更优算法推荐）
+3. 进阶学习建议（推荐进一步深入的知识点）
+此时 errorCategories 可为空数组，但 learningSuggestions 必须有内容。"""
 
 
 def _build_error_analysis_prompt(request: ErrorAnalysisRequest) -> str:
@@ -154,6 +160,23 @@ def _format_skill_states(request: ErrorAnalysisRequest) -> str | None:
 
 def _rule_based_fallback(request: ErrorAnalysisRequest) -> ErrorAnalysisData:
     """Fallback analysis using rule engine when AI is unavailable."""
+    analysis_id = f"err_{datetime.now().strftime('%Y%m%d')}_{uuid.uuid4().hex[:8]}"
+
+    # ── No submissions at all ──
+    if not request.submissions:
+        return ErrorAnalysisData(
+            analysisId=analysis_id,
+            overallAssessment="暂无提交记录，完成PTA平台实验后可使用AI错误分析功能。",
+            errorCategories=[],
+            learningSuggestions=[],
+            interventionTriggered=False,
+            interventionMessage=None,
+            severity="LOW",
+            aiGenerated=False,
+            latestCode=None,
+            latestJudgeStatus=None,
+        )
+
     error_stats: dict[str, list[SubmissionRecord]] = {}
     for sub in request.submissions:
         status = sub.judge_status.upper() if sub.judge_status else "UNKNOWN"
@@ -174,14 +197,51 @@ def _rule_based_fallback(request: ErrorAnalysisRequest) -> ErrorAnalysisData:
         error_categories.append(cat)
 
     total = len(request.submissions)
-    ac_count = len(error_stats.get("ACCEPTED", []))
+    ac_count = len(error_stats.get("ACCEPTED", [])) + len(error_stats.get("AC", []))
     triggered = total > 3 and ac_count < total * 0.3
 
     # Generate learning suggestions from skillStates or error types
     learning_suggestions = _generate_fallback_suggestions(request)
 
+    # ── All-clear: no errors, all ACCEPTED ──
+    if not error_categories:
+        if not learning_suggestions:
+            learning_suggestions = [
+                LearningSuggestion(
+                    topic="代码优化", priority="LOW",
+                    reason="所有提交均已通过，可以关注代码性能和可读性的提升空间",
+                    suggestedResources="阅读《代码整洁之道》或参考开源项目代码风格",
+                ),
+                LearningSuggestion(
+                    topic="算法复杂度", priority="LOW",
+                    reason="思考当前算法的时间/空间复杂度，考虑是否有更优解",
+                    suggestedResources="练习同题目的不同解法，对比效率差异",
+                ),
+                LearningSuggestion(
+                    topic="广度优先搜索", priority="LOW",
+                    reason="数据结构学习中建议进一步探索图论和高级搜索算法",
+                    suggestedResources="PTA平台-图论专题练习",
+                ),
+            ]
+        return ErrorAnalysisData(
+            analysisId=analysis_id,
+            overallAssessment=(
+                f"🎉 恭喜！{request.student_name or '同学'}在"
+                f"《{request.experiment_name or '本次实验'}》中{total}次提交全部通过，表现优秀！"
+                f"建议在此基础上关注代码优化和算法效率提升，以下为进阶学习建议。"
+            ),
+            errorCategories=[],
+            learningSuggestions=learning_suggestions,
+            interventionTriggered=False,
+            interventionMessage=None,
+            severity="LOW",
+            aiGenerated=False,
+            latestCode=_first_submission_code(request),
+            latestJudgeStatus=_first_submission_status(request),
+        )
+
     return ErrorAnalysisData(
-        analysisId=f"err_{datetime.now().strftime('%Y%m%d')}_{uuid.uuid4().hex[:8]}",
+        analysisId=analysis_id,
         overallAssessment=f"该学生在{request.experiment_name or '本次实验'}中共提交{total}次，"
         f"通过{ac_count}次。AI分析暂时不可用，以下为基于规则的分析。",
         errorCategories=error_categories,
@@ -308,6 +368,21 @@ def analyze_errors(request: ErrorAnalysisRequest, deepseek: DeepSeekClient) -> E
     """Run full error analysis: AI-driven with rule-based fallback."""
 
     analysis_id = f"err_{datetime.now().strftime('%Y%m%d')}_{uuid.uuid4().hex[:8]}"
+
+    # Short-circuit: no submissions to analyze
+    if not request.submissions:
+        return ErrorAnalysisData(
+            analysisId=analysis_id,
+            overallAssessment="暂无提交记录，完成PTA平台实验后可使用AI错误分析功能。",
+            errorCategories=[],
+            learningSuggestions=[],
+            interventionTriggered=False,
+            interventionMessage=None,
+            severity="LOW",
+            aiGenerated=False,
+            latestCode=None,
+            latestJudgeStatus=None,
+        )
 
     # Pre-check: has a valid API key?
     if not deepseek.settings.deepseek_api_key:
